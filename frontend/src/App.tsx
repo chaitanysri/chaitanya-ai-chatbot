@@ -736,7 +736,7 @@ export default function App() {
             }}
 
 
-            placeholder="Ask me about Chaitanya..."
+            placeholder="Ask me anything..."
 
             disabled={loading}
 
