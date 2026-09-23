@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ChangeEvent } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
@@ -47,6 +47,11 @@ type Message = {
   text: string;
 };
 
+type UploadedDocument = {
+  filename: string;
+  text: string;
+};
+
 
 export default function App() {
 
@@ -67,6 +72,14 @@ export default function App() {
 
   const [loading, setLoading] = useState(false);
 
+  const [uploadedDocument, setUploadedDocument] =
+    useState<UploadedDocument | null>(null);
+
+  const [uploading, setUploading] = useState(false);
+
+  const fileInputRef =
+    useRef<HTMLInputElement>(null);
+
   const chatBodyRef =
     useRef<HTMLDivElement>(null);
 
@@ -86,6 +99,63 @@ export default function App() {
 
   }, [messages, loading]);
 
+
+  /* =========================
+     FILE UPLOAD
+  ========================= */
+
+  const handleFileUpload = async (
+    event: ChangeEvent<HTMLInputElement>
+  ) => {
+    const file = event.target.files?.[0];
+
+    if (!file) return;
+
+    if (file.size > 5 * 1024 * 1024) {
+      alert("Please select a file smaller than 5 MB.");
+      event.target.value = "";
+      return;
+    }
+
+    setUploading(true);
+
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+
+      const response = await fetch(
+        `${import.meta.env.VITE_API_URL}/upload`,
+        {
+          method: "POST",
+          body: formData,
+        }
+      );
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(
+          data.detail || "Unable to upload the file."
+        );
+      }
+
+      setUploadedDocument({
+        filename: data.filename,
+        text: data.text,
+      });
+    } catch (error) {
+      console.error(error);
+
+      alert(
+        error instanceof Error
+          ? error.message
+          : "File upload failed."
+      );
+    } finally {
+      setUploading(false);
+      event.target.value = "";
+    }
+  };
 
   /* =========================
      SEND MESSAGE
@@ -146,6 +216,8 @@ export default function App() {
 
             message,
             history,
+            filename: uploadedDocument?.filename ?? null,
+            file_context: uploadedDocument?.text ?? null,
 
           }),
 
@@ -595,11 +667,43 @@ export default function App() {
 
         <div className="chatFooter">
 
+          {uploading && (
+            <div className="fileStatus">
+              Reading your document...
+            </div>
+          )}
+
+          {uploadedDocument && (
+            <div className="fileStatus">
+              <span>
+                📄 {uploadedDocument.filename}
+              </span>
+
+              <button
+                type="button"
+                onClick={() => setUploadedDocument(null)}
+                aria-label="Remove attached document"
+              >
+                ✕
+              </button>
+            </div>
+          )}
+
+
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".pdf,.docx,.txt,.csv"
+            onChange={handleFileUpload}
+            style={{ display: "none" }}
+          />
 
           <button
             className="attachButton"
             type="button"
             aria-label="Attach file"
+            disabled={uploading || loading}
+            onClick={() => fileInputRef.current?.click()}
           >
 
             <Paperclip size={23} />
