@@ -484,7 +484,7 @@ input {
   border-color: white;
 }
 
-.messageBubble strong {
+.messageBubble > strong {
   display: block;
 
   margin-bottom: 9px;
@@ -576,6 +576,7 @@ input {
 ========================= */
 
 .messageText strong {
+  display: inline;
   font-weight: 700;
 }
 
