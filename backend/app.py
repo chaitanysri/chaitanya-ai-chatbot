@@ -1,5 +1,6 @@
 import csv
 import io
+import json
 import logging
 import time
 import uuid
@@ -27,6 +28,8 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 
+import redis as redis_lib
+
 
 # Structured logging so real exceptions are visible in server logs even
 # though user-facing error messages stay generic.
@@ -41,10 +44,53 @@ app = FastAPI(
 )
 
 
+# Optional durable storage. Set REDIS_URL (e.g. from a free Upstash or
+# Redis Cloud instance) to make sessions and rate limits survive a
+# restart/redeploy and stay correct if you ever run more than one backend
+# instance. Without it, or if it's unreachable, both fall back to
+# in-memory storage — the app still works, it just forgets everything on
+# restart, same as before.
+#
+# This check runs once at startup, and the same verified client is reused
+# by both the rate limiter and the session store below, so they can never
+# disagree about whether Redis is actually usable (a mismatch there is
+# exactly what causes one subsystem to crash while the other quietly
+# falls back).
+REDIS_URL = os.getenv("REDIS_URL")
+REDIS_CLIENT = None
+
+if REDIS_URL:
+    try:
+        _candidate = redis_lib.from_url(
+            REDIS_URL, decode_responses=True, socket_timeout=3
+        )
+        _candidate.ping()
+        REDIS_CLIENT = _candidate
+        logger.info("Redis reachable at startup; using it for sessions "
+                     "and rate limiting.")
+    except Exception:
+        logger.exception(
+            "Could not connect to Redis at REDIS_URL; falling back to "
+            "in-memory storage for sessions and rate limiting (will "
+            "reset on restart)."
+        )
+else:
+    logger.info(
+        "REDIS_URL not set; using in-memory storage for sessions and "
+        "rate limiting (resets on restart)."
+    )
+
+
 # Rate limiting (per client IP) — this is the real defense for a public,
 # unauthenticated chat widget: it stops one visitor (or a bot) from
 # draining the Groq API quota, without requiring anyone to log in.
-limiter = Limiter(key_func=get_remote_address)
+# Uses Redis when it's confirmed reachable (above), so limits are shared
+# and durable; otherwise falls back to in-process memory rather than
+# risking every request crashing on a dead Redis connection.
+limiter = Limiter(
+    key_func=get_remote_address,
+    storage_uri=REDIS_URL if REDIS_CLIENT else "memory://",
+)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
@@ -735,26 +781,80 @@ class ChatResponse(BaseModel):
 # Server-side memory keyed by session_id, so the frontend doesn't have to
 # keep resending the full transcript and a reload/new tab with the same
 # session_id picks the conversation back up.
-#
-# NOTE: this is in-memory, so it resets on every server restart/redeploy.
-# That's an acceptable tradeoff for a portfolio chatbot; for durability
-# across restarts, swap this dict for Redis or a small database table.
-SESSION_HISTORY: dict[str, list[dict]] = {}
-SESSION_LAST_SEEN: dict[str, float] = {}
 SESSION_MAX_TURNS = 20  # keep the last N user+assistant exchanges
 SESSION_TTL_SECONDS = 6 * 60 * 60  # drop idle sessions after 6 hours
 
 
-def _cleanup_expired_sessions() -> None:
-    now = time.time()
-    expired = [
-        sid
-        for sid, last_seen in SESSION_LAST_SEEN.items()
-        if now - last_seen > SESSION_TTL_SECONDS
-    ]
-    for sid in expired:
-        SESSION_HISTORY.pop(sid, None)
-        SESSION_LAST_SEEN.pop(sid, None)
+class SessionStore:
+    """
+    Stores per-session chat history.
+
+    Uses the shared, already-verified Redis client (set up above) when
+    available — durable across restarts/redeploys, and correct if this
+    ever runs as more than one backend instance (an in-memory dict would
+    silently split history between instances).
+
+    Falls back to an in-memory dict if Redis isn't configured or isn't
+    reachable, so the app degrades gracefully instead of crashing.
+    """
+
+    def __init__(self, redis_client):
+        self._redis = redis_client
+
+        # In-memory fallback / local dev
+        self._memory: dict[str, list[dict]] = {}
+        self._memory_last_seen: dict[str, float] = {}
+
+    def get(self, session_id: str) -> list[dict]:
+        if self._redis:
+            try:
+                raw = self._redis.get(f"session:{session_id}")
+                return json.loads(raw) if raw else []
+            except Exception:
+                logger.exception(
+                    "Redis GET failed for session %s; treating as empty.",
+                    session_id,
+                )
+                return []
+
+        return self._memory.get(session_id, [])
+
+    def set(self, session_id: str, history: list[dict]) -> None:
+        if self._redis:
+            try:
+                self._redis.set(
+                    f"session:{session_id}",
+                    json.dumps(history),
+                    ex=SESSION_TTL_SECONDS,
+                )
+                return
+            except Exception:
+                logger.exception(
+                    "Redis SET failed for session %s; this turn won't "
+                    "persist.",
+                    session_id,
+                )
+                return
+
+        self._memory[session_id] = history
+        self._memory_last_seen[session_id] = time.time()
+        self._cleanup_expired_memory()
+
+    def _cleanup_expired_memory(self) -> None:
+        # Only the in-memory fallback needs manual cleanup — Redis
+        # expires keys on its own via the `ex` TTL above.
+        now = time.time()
+        expired = [
+            sid
+            for sid, last_seen in self._memory_last_seen.items()
+            if now - last_seen > SESSION_TTL_SECONDS
+        ]
+        for sid in expired:
+            self._memory.pop(sid, None)
+            self._memory_last_seen.pop(sid, None)
+
+
+session_store = SessionStore(REDIS_CLIENT)
 
 
 @app.get("/")
@@ -962,16 +1062,14 @@ async def upload_file(request: Request, file: UploadFile = File(...)):
 @limiter.limit("15/minute")
 def chat(request: Request, chat_request: ChatRequest):
 
-    _cleanup_expired_sessions()
-
     session_id = chat_request.session_id or str(uuid.uuid4())
-    SESSION_LAST_SEEN[session_id] = time.time()
 
     # Prefer server-side session history (authoritative, and the client
     # doesn't need to resend the whole transcript every turn). Fall back
-    # to whatever the client sent — e.g. right after a server restart,
-    # when SESSION_HISTORY is empty but the browser still has it.
-    stored_history = SESSION_HISTORY.get(session_id)
+    # to whatever the client sent — e.g. right after a restart with the
+    # in-memory fallback, when stored history is empty but the browser
+    # still has it.
+    stored_history = session_store.get(session_id)
     source_history = stored_history if stored_history else chat_request.history
 
     messages = []
@@ -1067,7 +1165,7 @@ How to use the document:
         {"role": "user", "content": chat_request.message},
         {"role": "assistant", "content": reply_text},
     ]
-    SESSION_HISTORY[session_id] = updated_history[-SESSION_MAX_TURNS * 2:]
+    session_store.set(session_id, updated_history[-SESSION_MAX_TURNS * 2:])
 
     return ChatResponse(
         response=reply_text,
