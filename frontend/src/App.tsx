@@ -693,7 +693,7 @@ export default function App() {
           <input
             ref={fileInputRef}
             type="file"
-            accept=".pdf,.docx,.txt,.csv"
+            accept=".pdf,.docx,.txt,.csv,.pptx,.xlsx,.png,.jpg,.jpeg"
             onChange={handleFileUpload}
             style={{ display: "none" }}
           />

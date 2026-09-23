@@ -8,3 +8,7 @@ python-dotenv
 python-multipart
 pypdf
 python-docx
+python-pptx
+openpyxl
+pytesseract
+Pillow

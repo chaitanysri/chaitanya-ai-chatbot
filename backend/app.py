@@ -4,6 +4,10 @@ import io
 from fastapi import UploadFile, File, HTTPException
 from pypdf import PdfReader
 from docx import Document
+from pptx import Presentation
+import openpyxl
+from PIL import Image
+import pytesseract
 import os
 from dotenv import load_dotenv
 
@@ -56,6 +60,29 @@ You have TWO main purposes:
 
 1. Personal Portfolio Assistant
 2. General AI Assistant and Doubt Solver
+
+
+==================================================
+RESPONSE LENGTH — HIGHEST PRIORITY RULE
+==================================================
+
+Default to short, direct answers. This rule overrides any other
+formatting instruction in this prompt.
+
+- For simple questions (facts about Chaitanya, quick definitions,
+  yes/no questions), answer in 1–3 sentences. No headings, no
+  bullet points, no preamble.
+- For questions that genuinely need structure (multi-step
+  instructions, comparisons, code with explanation), keep it as
+  short as possible while staying correct — use bullets or headings
+  only when they actually save the reader time, not by default.
+- Do not restate the question, do not add an introductory sentence
+  before getting to the answer, and do not add a summary sentence
+  after it.
+- Only give a long, detailed, fully-structured answer when the user
+  explicitly asks for detail (e.g. "explain in depth", "give me a
+  full breakdown", "write a detailed guide").
+- If unsure how much detail to give, err on the side of shorter.
 
 
 ==================================================
@@ -299,11 +326,11 @@ Be friendly, professional, and helpful.
 
 For general questions:
 
-- Explain concepts clearly.
-- Start with a simple definition.
-- Give an example when useful.
-- Use headings and bullet points.
-- Use numbered steps for procedures.
+- Explain concepts clearly and briefly by default (see RESPONSE
+  LENGTH above).
+- Use headings, bullet points, or numbered steps only when the
+  content actually has multiple distinct parts — not for a short
+  answer.
 - Provide code when requested.
 - Keep explanations understandable for students and beginners
   unless the user asks for advanced detail.
@@ -551,19 +578,22 @@ When discussing this research, do not invent experimental values or results unle
 RESPONSE FORMATTING RULES
 ========================
 
-Use clean Markdown formatting.
+See the RESPONSE LENGTH rule above — it takes priority over the
+formatting preferences below. Most answers should be short plain
+sentences with no formatting at all.
 
-Use:
-- Headings for sections
+When a response does need structure, use clean Markdown formatting:
+- Headings only for genuinely long, multi-section answers
 - Bullet points for lists
 - Numbered lists for step-by-step instructions
-- Bold text for important terms
+- Bold text for important terms, used sparingly
 - Fenced code blocks for programming code
 
 IMPORTANT:
 Do NOT use Markdown tables unless the user explicitly asks for a table.
 
-Prefer bullet points instead of tables.
+Prefer bullet points instead of tables, and only when a list is
+actually needed.
 
 When providing code, always use fenced code blocks and specify the programming language when possible.
 
@@ -676,7 +706,14 @@ ALLOWED_EXTENSIONS = {
     ".docx",
     ".txt",
     ".csv",
+    ".pptx",
+    ".xlsx",
+    ".png",
+    ".jpg",
+    ".jpeg",
 }
+
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg"}
 
 
 @app.post("/upload")
@@ -689,7 +726,10 @@ async def upload_file(file: UploadFile = File(...)):
     if extension not in ALLOWED_EXTENSIONS:
         raise HTTPException(
             status_code=400,
-            detail="Only PDF, DOCX, TXT and CSV files are supported."
+            detail=(
+                "Only PDF, DOCX, PPTX, XLSX, TXT, CSV, PNG, JPG and "
+                "JPEG files are supported."
+            )
         )
 
     content = await file.read(MAX_FILE_SIZE + 1)
@@ -737,9 +777,73 @@ async def upload_file(file: UploadFile = File(...)):
                 for row in reader
             )
 
+        elif extension == ".pptx":
+
+            presentation = Presentation(io.BytesIO(content))
+
+            slide_texts = []
+
+            for i, slide in enumerate(presentation.slides, start=1):
+                lines = [f"--- Slide {i} ---"]
+                for shape in slide.shapes:
+                    if shape.has_text_frame:
+                        for paragraph in shape.text_frame.paragraphs:
+                            line = "".join(run.text for run in paragraph.runs)
+                            if line.strip():
+                                lines.append(line)
+                    if shape.has_table:
+                        for row in shape.table.rows:
+                            lines.append(
+                                " | ".join(cell.text for cell in row.cells)
+                            )
+                slide_texts.append("\n".join(lines))
+
+            text = "\n\n".join(slide_texts)
+
+        elif extension == ".xlsx":
+
+            workbook = openpyxl.load_workbook(
+                io.BytesIO(content), data_only=True, read_only=True
+            )
+
+            sheet_texts = []
+
+            for sheet in workbook.worksheets:
+                lines = [f"--- Sheet: {sheet.title} ---"]
+                for row in sheet.iter_rows(values_only=True):
+                    if any(cell is not None for cell in row):
+                        lines.append(
+                            " | ".join(
+                                "" if cell is None else str(cell)
+                                for cell in row
+                            )
+                        )
+                sheet_texts.append("\n".join(lines))
+
+            text = "\n\n".join(sheet_texts)
+
+        elif extension in IMAGE_EXTENSIONS:
+
+            try:
+                image = Image.open(io.BytesIO(content))
+                text = pytesseract.image_to_string(image)
+            except pytesseract.TesseractNotFoundError:
+                raise HTTPException(
+                    status_code=500,
+                    detail=(
+                        "Image text extraction (OCR) is not available on "
+                        "this server. The 'tesseract-ocr' engine must be "
+                        "installed on the host."
+                    )
+                )
+
         else:
 
             text = content.decode("utf-8-sig")
+
+    except HTTPException:
+
+        raise
 
     except Exception:
 
