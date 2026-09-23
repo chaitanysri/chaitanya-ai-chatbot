@@ -77,23 +77,6 @@ export default function App() {
 
   const [uploading, setUploading] = useState(false);
 
-  /* Persisted conversation session id. The backend keeps the actual
-     history server-side keyed by this id, so a page reload (same
-     browser) picks the conversation back up without resending the
-     whole transcript. */
-  const [sessionId, setSessionId] = useState<string>(() => {
-    const existing = localStorage.getItem("chaitanya_session_id");
-    if (existing) return existing;
-
-    const generated =
-      typeof crypto !== "undefined" && "randomUUID" in crypto
-        ? crypto.randomUUID()
-        : `session-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-
-    localStorage.setItem("chaitanya_session_id", generated);
-    return generated;
-  });
-
   const fileInputRef =
     useRef<HTMLInputElement>(null);
 
@@ -235,7 +218,6 @@ export default function App() {
             history,
             filename: uploadedDocument?.filename ?? null,
             file_context: uploadedDocument?.text ?? null,
-            session_id: sessionId,
 
           }),
 
@@ -244,23 +226,16 @@ export default function App() {
       );
 
 
-      const data = await response.json();
-
       if (!response.ok) {
 
         throw new Error(
-          response.status === 429
-            ? "You're sending messages a bit too fast — please wait a moment and try again."
-            : data.detail || "Backend request failed"
+          "Backend request failed"
         );
 
       }
 
-      /* Backend may hand back a new/confirmed session id */
-      if (data.session_id && data.session_id !== sessionId) {
-        setSessionId(data.session_id);
-        localStorage.setItem("chaitanya_session_id", data.session_id);
-      }
+
+      const data = await response.json();
 
 
       /* Add AI response */
@@ -291,9 +266,7 @@ export default function App() {
         {
           sender: "assistant",
           text:
-            error instanceof Error
-              ? error.message
-              : "I couldn't connect to the backend. Please make sure the FastAPI server is running.",
+            "I couldn't connect to the backend. Please make sure the FastAPI server is running.",
         },
 
       ]);
