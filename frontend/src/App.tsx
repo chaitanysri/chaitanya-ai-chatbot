@@ -178,6 +178,34 @@ export default function App() {
 
   useEffect(() => {
     refreshSessions();
+
+    /* Restore the conversation for the saved session on page load, so
+       the chat shown always matches the session id being used. */
+    (async () => {
+      try {
+        const res = await fetch(
+          `${import.meta.env.VITE_API_URL}/sessions/${sessionId}/messages`
+        );
+        if (!res.ok) return;
+        const data = await res.json();
+
+        const restored: Message[] = (data.history ?? []).map(
+          (turn: { role: string; content: string; attachment?: string }) => ({
+            sender: turn.role === "assistant" ? "assistant" : "user",
+            text: turn.content,
+            attachment: turn.attachment,
+          })
+        );
+
+        if (restored.length) {
+          setMessages((prev) =>
+            prev.some((m) => m.sender === "user") ? prev : restored
+          );
+        }
+      } catch (error) {
+        console.error(error);
+      }
+    })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -194,7 +222,11 @@ export default function App() {
   };
 
   const openSession = async (targetSessionId: string) => {
-    if (targetSessionId === sessionId) {
+    /* Only skip reloading if this chat is actually the one on screen */
+    if (
+      targetSessionId === sessionId &&
+      messages.some((m) => m.sender === "user")
+    ) {
       setHistoryOpen(false);
       return;
     }
