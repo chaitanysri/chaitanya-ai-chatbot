@@ -29,6 +29,7 @@ from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 
 import redis as redis_lib
+import groq
 
 
 # Structured logging so real exceptions are visible in server logs even
@@ -787,6 +788,9 @@ class ChatResponse(BaseModel):
 # keep resending the full transcript and a reload/new tab with the same
 # session_id picks the conversation back up.
 SESSION_MAX_TURNS = 20  # keep the last N user+assistant exchanges
+# Only the most recent messages are sent to the model each turn. This keeps
+# each request small so free-tier token-per-minute limits are hit less often.
+MODEL_HISTORY_MESSAGES = 12
 SESSION_TTL_SECONDS = 6 * 60 * 60  # drop idle sessions after 6 hours
 
 
@@ -1263,7 +1267,7 @@ def chat(request: Request, chat_request: ChatRequest):
     )
 
     # Convert stored/frontend chat history into LangChain messages
-    for turn in source_history:
+    for turn in source_history[-MODEL_HISTORY_MESSAGES:]:
 
         role = turn.get("role")
         content = turn.get("content", "")
@@ -1327,9 +1331,23 @@ How to use the document:
     # Get response from Groq
     try:
         response = llm.invoke(messages)
-    except Exception:
+    except groq.RateLimitError as exc:
+        # Provider-side limit (tokens/requests per minute or per day).
+        logger.warning(
+            "Groq rate limit hit for session %s: %s", session_id, exc
+        )
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "The assistant is handling a lot of requests right now. "
+                "Please wait about a minute and try again."
+            ),
+        )
+    except Exception as exc:
         logger.exception(
-            "Groq LLM call failed for session %s", session_id
+            "Groq LLM call failed for session %s (%s)",
+            session_id,
+            type(exc).__name__,
         )
         raise HTTPException(
             status_code=502,
