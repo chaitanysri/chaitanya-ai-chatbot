@@ -130,9 +130,9 @@ llm = ChatGroq(
 
 # AI personality and behavior
 SYSTEM_PROMPT = """
-You are Chaitanya's AI Assistant.
+You are Chaitanya, a personal AI assistant.
 
-Your name is Chaitanya's AI Assistant.
+Your name is Chaitanya. Never call yourself "Chaitanya's AI Assistant".
 
 You were built using LangChain and Groq.
 
@@ -240,7 +240,7 @@ INTRODUCTION
 
 When introducing yourself, say:
 
-"I'm Chaitanya's AI Assistant, built using LangChain and Groq. 
+"I'm Chaitanya, a personal AI assistant built using LangChain and Groq. 
 I can tell you about Chaitanya's projects, skills, education,
 research, and experience, and I can also help with general
 questions, coding, and technical explanations."
@@ -452,9 +452,9 @@ Example:
 
 ```python
 print("Hello World")
-You are Chaitanya's AI Assistant.
+You are Chaitanya, a personal AI assistant.
 
-Your name is Chaitanya's AI Assistant.
+Your name is Chaitanya. Never call yourself "Chaitanya's AI Assistant".
 
 You were built using LangChain and Groq.
 
@@ -472,7 +472,7 @@ Your purpose is to help users learn about Chaitanya, including:
 
 When introducing yourself, say:
 
-"I'm Chaitanya's AI Assistant, built using LangChain and Groq. I can tell you about Chaitanya's projects, skills, education, research work, and experience."
+"I'm Chaitanya, a personal AI assistant built using LangChain and Groq. I can tell you about Chaitanya's projects, skills, education, research work, and experience."
 
 Be friendly, professional, concise, and helpful.
 
@@ -871,12 +871,30 @@ class SessionStore:
 
 
 def _make_session_title(message: str) -> str:
-    """Turn a user's first message into a short sidebar label, the same
-    way Claude/ChatGPT-style history sidebars title a new chat."""
+    """Short sidebar label for a chat, derived from the user's first
+    question. Tries a tiny LLM call for a clean 3-6 word title and falls
+    back to a trimmed version of the message."""
     text = " ".join(message.strip().split())
     if not text:
         return "New chat"
-    return text[:40] + ("…" if len(text) > 40 else "")
+
+    fallback = text[:40] + ("…" if len(text) > 40 else "")
+    try:
+        result = llm.invoke([
+            SystemMessage(content=(
+                "Write a short title (3 to 6 words) for a chat that starts "
+                "with the user message below. Reply with ONLY the title: "
+                "no quotes, no trailing punctuation."
+            )),
+            HumanMessage(content=text[:500]),
+        ])
+        title = " ".join(str(result.content).strip().strip("\"'").split())
+        title = title.rstrip(".!?:")
+        if 0 < len(title) <= 60:
+            return title
+    except Exception:
+        logger.exception("Title generation failed; using fallback")
+    return fallback
 
 
 class BrowserSessionIndex:
@@ -955,6 +973,8 @@ class BrowserSessionIndex:
                     "title": _make_session_title(first_message or ""),
                     "created_at": now,
                 }
+                if meta.get("title") == "New chat" and first_message:
+                    meta["title"] = _make_session_title(first_message)
                 meta["last_updated"] = now
 
                 self._redis.set(
@@ -980,6 +1000,13 @@ class BrowserSessionIndex:
                 "title": _make_session_title(first_message or ""),
                 "created_at": now,
             }
+        elif (
+            self._memory_meta[session_id].get("title") == "New chat"
+            and first_message
+        ):
+            self._memory_meta[session_id]["title"] = _make_session_title(
+                first_message
+            )
         self._memory_meta[session_id]["last_updated"] = now
 
     def delete_session(self, browser_id: str, session_id: str) -> None:
@@ -1221,7 +1248,9 @@ def chat(request: Request, chat_request: ChatRequest):
     # still has it.
     stored_history = session_store.get(session_id)
     source_history = stored_history if stored_history else chat_request.history
-    is_new_session = not source_history
+    is_new_session = not any(
+        m.get("role") == "user" for m in (source_history or [])
+    )
 
     messages = []
 
