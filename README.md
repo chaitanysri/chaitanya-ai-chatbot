@@ -4,8 +4,7 @@ An AI chatbot that works as both a **personal portfolio assistant** (ask about m
 
 **🔗 Live demo:** https://chaitanya-ai-chatbot.vercel.app
 
-<!-- Add a screenshot or GIF here:  ![Chaitanya AI](docs/screenshot.png) -->
-
+   ![Chaitanya AI](docs/screenshot.png)
 ## Features
 
 - 🤖 **Two-in-one assistant** — answers questions about me, and general questions too
