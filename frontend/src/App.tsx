@@ -13,6 +13,7 @@ import {
   Plus,
   Trash2,
   X,
+  FileText,
 } from "lucide-react";
 
 import "./App.css";
@@ -49,6 +50,12 @@ const calculateAge = (
 type Message = {
   sender: "user" | "assistant";
   text: string;
+  attachment?: string; // filename of a document sent with this message
+};
+
+const fileExtLabel = (name: string) => {
+  const ext = name.includes(".") ? name.split(".").pop() : "";
+  return (ext || "FILE").toUpperCase();
 };
 
 type UploadedDocument = {
@@ -220,12 +227,19 @@ export default function App() {
     event.stopPropagation();
 
     try {
-      await fetch(
+      const res = await fetch(
         `${import.meta.env.VITE_API_URL}/sessions/${targetSessionId}?browser_id=${browserId}`,
         { method: "DELETE" }
       );
+
+      if (!res.ok) {
+        throw new Error(`Delete failed (${res.status})`);
+      }
     } catch (error) {
       console.error(error);
+      alert("Couldn't delete that chat. Please try again.");
+      refreshSessions();
+      return;
     }
 
     setSessions((prev) =>
@@ -315,6 +329,7 @@ export default function App() {
       {
         sender: "user",
         text: message,
+        attachment: uploadedDocument?.filename,
       },
 
     ]);
@@ -943,6 +958,22 @@ export default function App() {
                   </strong>
 
 
+                  {message.attachment && (
+                    <div className="fileCard fileCardInBubble">
+                      <div className="fileCardIcon">
+                        <FileText size={18} />
+                      </div>
+                      <div className="fileCardInfo">
+                        <span className="fileCardName">
+                          {message.attachment}
+                        </span>
+                        <span className="fileCardType">
+                          {fileExtLabel(message.attachment)}
+                        </span>
+                      </div>
+                    </div>
+                  )}
+
                   <div className="messageText">
 
 
@@ -1028,30 +1059,51 @@ export default function App() {
             CHAT INPUT
         ========================= */}
 
+        {(uploading || uploadedDocument) && (
+          <div className="attachmentTray">
+            {uploading ? (
+              <div className="fileCard fileCardLoading">
+                <div className="fileCardIcon">
+                  <FileText size={20} />
+                </div>
+                <div className="fileCardInfo">
+                  <span className="fileCardName">
+                    Reading your document...
+                  </span>
+                </div>
+              </div>
+            ) : (
+              uploadedDocument && (
+                <div className="fileCard">
+                  <div className="fileCardIcon">
+                    <FileText size={20} />
+                  </div>
+                  <div className="fileCardInfo">
+                    <span
+                      className="fileCardName"
+                      title={uploadedDocument.filename}
+                    >
+                      {uploadedDocument.filename}
+                    </span>
+                    <span className="fileCardType">
+                      {fileExtLabel(uploadedDocument.filename)}
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    className="fileCardRemove"
+                    onClick={() => setUploadedDocument(null)}
+                    aria-label="Remove attached document"
+                  >
+                    <X size={14} />
+                  </button>
+                </div>
+              )
+            )}
+          </div>
+        )}
+
         <div className="chatFooter">
-
-          {uploading && (
-            <div className="fileStatus">
-              Reading your document...
-            </div>
-          )}
-
-          {uploadedDocument && (
-            <div className="fileStatus">
-              <span>
-                📄 {uploadedDocument.filename}
-              </span>
-
-              <button
-                type="button"
-                onClick={() => setUploadedDocument(null)}
-                aria-label="Remove attached document"
-              >
-                ✕
-              </button>
-            </div>
-          )}
-
 
           <input
             ref={fileInputRef}
