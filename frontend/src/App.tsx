@@ -692,7 +692,7 @@ export default function App() {
           <p className="description">
 
             Hi, I'm Chaitanya Sri — an Information
-            Technology student passionate about
+            Technology graduate passionate about
             Artificial Intelligence, Generative AI,
             web development, and intelligent
             applications.
