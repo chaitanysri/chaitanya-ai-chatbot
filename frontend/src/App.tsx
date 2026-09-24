@@ -208,9 +208,10 @@ export default function App() {
       const data = await res.json();
 
       const loaded: Message[] = (data.history ?? []).map(
-        (turn: { role: string; content: string }) => ({
+        (turn: { role: string; content: string; attachment?: string }) => ({
           sender: turn.role === "assistant" ? "assistant" : "user",
           text: turn.content,
+          attachment: turn.attachment,
         })
       );
 
@@ -366,6 +367,7 @@ export default function App() {
 
         role: msg.sender,
         content: msg.text,
+        ...(msg.attachment ? { attachment: msg.attachment } : {}),
 
       }));
 
@@ -389,6 +391,7 @@ export default function App() {
             message,
             history,
             filename: documentForRequest?.filename ?? null,
+            attachment_name: uploadedDocument?.filename ?? null,
             file_context: documentForRequest?.text ?? null,
             session_id: sessionId,
             browser_id: browserId,

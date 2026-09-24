@@ -766,6 +766,9 @@ class ChatRequest(BaseModel):
     history: list = []
     file_context: str | None = None
     filename: str | None = None
+    # Set only on the message a file was newly attached to, so reopened
+    # chats can show the attachment card on that message.
+    attachment_name: str | None = None
     session_id: str | None = None
     browser_id: str | None = None
 
@@ -1342,7 +1345,15 @@ How to use the document:
     # not the augmented file-context wrapper, so it isn't re-inlined on
     # every future turn), trimmed to the last SESSION_MAX_TURNS exchanges.
     updated_history = list(source_history) + [
-        {"role": "user", "content": chat_request.message},
+        {
+            "role": "user",
+            "content": chat_request.message,
+            **(
+                {"attachment": chat_request.attachment_name}
+                if chat_request.attachment_name
+                else {}
+            ),
+        },
         {"role": "assistant", "content": reply_text},
     ]
     session_store.set(session_id, updated_history[-SESSION_MAX_TURNS * 2:])
