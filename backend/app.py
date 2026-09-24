@@ -767,11 +767,13 @@ class ChatRequest(BaseModel):
     file_context: str | None = None
     filename: str | None = None
     session_id: str | None = None
+    browser_id: str | None = None
 
 
 class ChatResponse(BaseModel):
     response: str
     session_id: str
+    browser_id: str
 
 
 # =========================
@@ -840,6 +842,20 @@ class SessionStore:
         self._memory_last_seen[session_id] = time.time()
         self._cleanup_expired_memory()
 
+    def delete(self, session_id: str) -> None:
+        if self._redis:
+            try:
+                self._redis.delete(f"session:{session_id}")
+                return
+            except Exception:
+                logger.exception(
+                    "Redis DELETE failed for session %s.", session_id
+                )
+                return
+
+        self._memory.pop(session_id, None)
+        self._memory_last_seen.pop(session_id, None)
+
     def _cleanup_expired_memory(self) -> None:
         # Only the in-memory fallback needs manual cleanup — Redis
         # expires keys on its own via the `ex` TTL above.
@@ -854,7 +870,140 @@ class SessionStore:
             self._memory_last_seen.pop(sid, None)
 
 
+def _make_session_title(message: str) -> str:
+    """Turn a user's first message into a short sidebar label, the same
+    way Claude/ChatGPT-style history sidebars title a new chat."""
+    text = " ".join(message.strip().split())
+    if not text:
+        return "New chat"
+    return text[:40] + ("…" if len(text) > 40 else "")
+
+
+class BrowserSessionIndex:
+    """
+    Tracks which chat sessions (conversations) belong to which browser,
+    plus light metadata (a title, timestamps) per session — this is what
+    powers a "past chats" sidebar, similar to Claude's own chat history.
+
+    "Browser" here just means a persisted id in that visitor's
+    localStorage — there's no login, so this is per-device, not a real
+    user account. Clearing browser storage or switching devices loses
+    the list (the underlying conversations in SessionStore aren't
+    deleted, just no longer indexed under that browser).
+
+    Uses the same shared, already-verified Redis client as SessionStore
+    when available; falls back to in-memory dicts otherwise.
+    """
+
+    MAX_SESSIONS_PER_BROWSER = 50
+
+    def __init__(self, redis_client):
+        self._redis = redis_client
+
+        # In-memory fallback / local dev
+        self._memory_sessions: dict[str, list[str]] = {}
+        self._memory_meta: dict[str, dict] = {}
+
+    def list_sessions(self, browser_id: str) -> list[dict]:
+        if self._redis:
+            try:
+                session_ids = self._redis.zrevrange(
+                    f"browser:{browser_id}:sessions", 0,
+                    self.MAX_SESSIONS_PER_BROWSER - 1,
+                )
+                sessions = []
+                for sid in session_ids:
+                    raw = self._redis.get(f"session_meta:{sid}")
+                    if raw:
+                        sessions.append({"session_id": sid, **json.loads(raw)})
+                return sessions
+            except Exception:
+                logger.exception(
+                    "Redis error listing sessions for browser %s",
+                    browser_id,
+                )
+                return []
+
+        session_ids = list(
+            reversed(self._memory_sessions.get(browser_id, []))
+        )
+        return [
+            {"session_id": sid, **self._memory_meta[sid]}
+            for sid in session_ids
+            if sid in self._memory_meta
+        ]
+
+    def touch_session(
+        self, browser_id: str, session_id: str, first_message: str | None
+    ) -> None:
+        """Register a session under a browser (if not already), and
+        update its last-active time. Only sets the title once, from the
+        session's first message — later calls just bump recency."""
+        now = time.time()
+
+        if self._redis:
+            try:
+                self._redis.zadd(
+                    f"browser:{browser_id}:sessions", {session_id: now}
+                )
+                self._redis.expire(
+                    f"browser:{browser_id}:sessions", SESSION_TTL_SECONDS
+                )
+
+                existing = self._redis.get(f"session_meta:{session_id}")
+                meta = json.loads(existing) if existing else {
+                    "title": _make_session_title(first_message or ""),
+                    "created_at": now,
+                }
+                meta["last_updated"] = now
+
+                self._redis.set(
+                    f"session_meta:{session_id}",
+                    json.dumps(meta),
+                    ex=SESSION_TTL_SECONDS,
+                )
+                return
+            except Exception:
+                logger.exception(
+                    "Redis error touching session %s", session_id
+                )
+                return
+
+        ids = self._memory_sessions.setdefault(browser_id, [])
+        if session_id in ids:
+            ids.remove(session_id)
+        ids.append(session_id)
+        self._memory_sessions[browser_id] = ids[-self.MAX_SESSIONS_PER_BROWSER:]
+
+        if session_id not in self._memory_meta:
+            self._memory_meta[session_id] = {
+                "title": _make_session_title(first_message or ""),
+                "created_at": now,
+            }
+        self._memory_meta[session_id]["last_updated"] = now
+
+    def delete_session(self, browser_id: str, session_id: str) -> None:
+        if self._redis:
+            try:
+                self._redis.zrem(
+                    f"browser:{browser_id}:sessions", session_id
+                )
+                self._redis.delete(f"session_meta:{session_id}")
+                return
+            except Exception:
+                logger.exception(
+                    "Redis error deleting session %s", session_id
+                )
+                return
+
+        ids = self._memory_sessions.get(browser_id, [])
+        if session_id in ids:
+            ids.remove(session_id)
+        self._memory_meta.pop(session_id, None)
+
+
 session_store = SessionStore(REDIS_CLIENT)
+browser_index = BrowserSessionIndex(REDIS_CLIENT)
 
 
 @app.get("/")
@@ -1063,6 +1212,7 @@ async def upload_file(request: Request, file: UploadFile = File(...)):
 def chat(request: Request, chat_request: ChatRequest):
 
     session_id = chat_request.session_id or str(uuid.uuid4())
+    browser_id = chat_request.browser_id or str(uuid.uuid4())
 
     # Prefer server-side session history (authoritative, and the client
     # doesn't need to resend the whole transcript every turn). Fall back
@@ -1071,6 +1221,7 @@ def chat(request: Request, chat_request: ChatRequest):
     # still has it.
     stored_history = session_store.get(session_id)
     source_history = stored_history if stored_history else chat_request.history
+    is_new_session = not source_history
 
     messages = []
 
@@ -1167,7 +1318,45 @@ How to use the document:
     ]
     session_store.set(session_id, updated_history[-SESSION_MAX_TURNS * 2:])
 
+    # Record/refresh this session under the browser's chat-history list.
+    # The title is only ever set from the session's first message.
+    browser_index.touch_session(
+        browser_id,
+        session_id,
+        first_message=chat_request.message if is_new_session else None,
+    )
+
     return ChatResponse(
         response=reply_text,
         session_id=session_id,
+        browser_id=browser_id,
     )
+
+
+# =========================
+# CHAT HISTORY (SIDEBAR)
+# =========================
+#
+# These three endpoints back a "past chats" sidebar in the frontend,
+# similar to Claude's own chat history: list a browser's past
+# conversations, load one back in, or delete one.
+
+
+@app.get("/sessions")
+@limiter.limit("30/minute")
+def list_sessions(request: Request, browser_id: str):
+    return {"sessions": browser_index.list_sessions(browser_id)}
+
+
+@app.get("/sessions/{session_id}/messages")
+@limiter.limit("30/minute")
+def get_session_messages(request: Request, session_id: str):
+    return {"history": session_store.get(session_id)}
+
+
+@app.delete("/sessions/{session_id}")
+@limiter.limit("30/minute")
+def delete_session(request: Request, session_id: str, browser_id: str):
+    browser_index.delete_session(browser_id, session_id)
+    session_store.delete(session_id)
+    return {"deleted": True}
