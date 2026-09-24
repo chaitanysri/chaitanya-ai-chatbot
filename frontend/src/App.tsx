@@ -99,6 +99,12 @@ export default function App() {
   const [uploadedDocument, setUploadedDocument] =
     useState<UploadedDocument | null>(null);
 
+  /* The document from the most recent upload, kept in the background so
+     follow-up questions in the same chat can still use it after the
+     attachment card has moved out of the input area. */
+  const [activeDocument, setActiveDocument] =
+    useState<UploadedDocument | null>(null);
+
   const [uploading, setUploading] = useState(false);
 
   /* Persisted conversation session id. The backend keeps the actual
@@ -183,6 +189,7 @@ export default function App() {
 
     setMessages([DEFAULT_GREETING]);
     setUploadedDocument(null);
+    setActiveDocument(null);
     setHistoryOpen(false);
   };
 
@@ -211,6 +218,7 @@ export default function App() {
       setSessionId(targetSessionId);
       localStorage.setItem("chaitanya_session_id", targetSessionId);
       setUploadedDocument(null);
+      setActiveDocument(null);
     } catch (error) {
       console.error(error);
       alert("Couldn't load that conversation.");
@@ -319,6 +327,10 @@ export default function App() {
 
     if (!message || loading) return;
 
+    /* A freshly attached file wins; otherwise keep using the one from
+       earlier in this chat so follow-up questions still work. */
+    const documentForRequest = uploadedDocument ?? activeDocument;
+
 
     /* Add user's message immediately */
 
@@ -336,6 +348,13 @@ export default function App() {
 
 
     setInput("");
+
+    /* Move the attachment out of the input area once it's sent */
+    if (uploadedDocument) {
+      setActiveDocument(uploadedDocument);
+      setUploadedDocument(null);
+    }
+
     setLoading(true);
 
 
@@ -369,8 +388,8 @@ export default function App() {
 
             message,
             history,
-            filename: uploadedDocument?.filename ?? null,
-            file_context: uploadedDocument?.text ?? null,
+            filename: documentForRequest?.filename ?? null,
+            file_context: documentForRequest?.text ?? null,
             session_id: sessionId,
             browser_id: browserId,
 
