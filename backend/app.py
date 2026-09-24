@@ -133,14 +133,18 @@ GROQ_MODELS = [
     if m.strip()
 ]
 
+# Fail over immediately (no waiting/retrying) on every model except the
+# last one, so a rate-limited request is answered by the next model within
+# a moment instead of sitting in a retry delay. The last model keeps one
+# retry to ride out a short per-minute limit.
 llms = [
     ChatGroq(
         temperature=0.5,
         model=model_name,
         groq_api_key=os.getenv("GROQ_API_KEY"),
-        max_retries=1,
+        max_retries=1 if i == len(GROQ_MODELS) - 1 else 0,
     )
-    for model_name in GROQ_MODELS
+    for i, model_name in enumerate(GROQ_MODELS)
 ]
 llm = llms[0]  # primary model (also used for short chat titles)
 
