@@ -28,6 +28,7 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 
+import re
 import redis as redis_lib
 import groq
 
@@ -120,11 +121,50 @@ app.add_middleware(
 
 
 # Groq LLM
-llm = ChatGroq(
-    temperature=0.5,
-    model="openai/gpt-oss-20b",
-    groq_api_key=os.getenv("GROQ_API_KEY")
-)
+# Groq's free tier meters each model separately (per-minute and per-day
+# token budgets), so if the first model is rate limited the request is
+# retried on the next one. Override with GROQ_MODELS (comma-separated).
+GROQ_MODELS = [
+    m.strip()
+    for m in os.getenv(
+        "GROQ_MODELS",
+        "openai/gpt-oss-20b,openai/gpt-oss-120b,qwen/qwen3.8-27b",
+    ).split(",")
+    if m.strip()
+]
+
+llms = [
+    ChatGroq(
+        temperature=0.5,
+        model=model_name,
+        groq_api_key=os.getenv("GROQ_API_KEY"),
+        max_retries=1,
+    )
+    for model_name in GROQ_MODELS
+]
+llm = llms[0]  # primary model (also used for short chat titles)
+
+
+def invoke_with_fallback(messages):
+    """Call the primary model; if it is rate limited or unavailable, try
+    the next configured model. Raises the last error if all fail."""
+    last_exc = None
+    for candidate in llms:
+        try:
+            return candidate.invoke(messages)
+        except (
+            groq.RateLimitError,
+            groq.NotFoundError,
+            groq.InternalServerError,
+            groq.APIConnectionError,
+        ) as exc:
+            last_exc = exc
+            logger.warning(
+                "Model %s unavailable (%s); trying next model",
+                getattr(candidate, "model_name", "?"),
+                type(exc).__name__,
+            )
+    raise last_exc
 
 
 # AI personality and knowledge
@@ -1330,7 +1370,7 @@ How to use the document:
 
     # Get response from Groq
     try:
-        response = llm.invoke(messages)
+        response = invoke_with_fallback(messages)
     except groq.RateLimitError as exc:
         # Provider-side limit (tokens/requests per minute or per day).
         logger.warning(
@@ -1357,7 +1397,10 @@ How to use the document:
             ),
         )
 
-    reply_text = response.content
+    # Some models return their reasoning inside <think> tags; hide it.
+    reply_text = re.sub(
+        r"<think>.*?</think>", "", str(response.content), flags=re.DOTALL
+    ).strip()
 
     # Persist this turn under the session (store the plain user message,
     # not the augmented file-context wrapper, so it isn't re-inlined on
